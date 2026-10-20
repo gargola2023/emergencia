@@ -5,6 +5,7 @@ y las deja como JSON junto al listado publicado en GitHub Pages.
 
   * datos/ema.json  <- API DMC de estaciones automáticas (requiere DMC_USUARIO y DMC_TOKEN como secretos)
   * datos/mop.json  <- Emergencias en infraestructura MOP (respaldo si el navegador no puede leer el servidor MOP)
+  * datos/sec.json  <- SEC "Interrupciones en línea": clientes sin suministro por comuna (todas las distribuidoras)
 
 Solo usa la biblioteca estándar de Python. Nunca falla el flujo: si una fuente no responde,
 escribe el error en su JSON y el listado lo muestra.
@@ -17,6 +18,8 @@ DIAS_MOP = 3
 EMA_URL = "https://climatologia.meteochile.gob.cl/application/geoservicios/getEmaResumenDiarioGeo"
 MOP_URL = "https://rest-sit.mop.gob.cl/arcgis/rest/services/EMERGENCIA/EMERGENCIA_MOP/MapServer/0/query"
 UA = {"User-Agent": "emergencias-quebradas/1.0 (GitHub Actions)"}
+SEC_URL = "https://apps.sec.cl/INTONLINEv1/ClientesAfectados/"
+SEC_REGIONES = {"Coquimbo": 4, "Valparaiso": 5, "Metropolitana": 13, "O`Higgins": 6}   # nombres tal como los entrega la SEC
 
 
 def ahora_utc():
@@ -36,6 +39,33 @@ def leer_json(url, timeout=60):
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
                 return json.load(r), "certificado TLS no verificable; se leyó sin verificar"
         raise
+
+
+def post_sec(endpoint, cuerpo, timeout=40):
+    """La SEC solo responde POST con JSON (sin cabeceras CORS, por eso se consulta desde el servidor)."""
+    req = urllib.request.Request(SEC_URL + endpoint, data=json.dumps(cuerpo).encode(), method="POST", headers={
+        **UA, "Content-Type": "application/json; charset=utf-8", "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest", "Referer": "https://apps.sec.cl/INTONLINEv1/index.aspx",
+        "Origin": "https://apps.sec.cl"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def sec():
+    try:
+        serie = post_sec("Get", {})
+        ult = serie[-1]
+        filas = post_sec("GetPorFecha", {k: ult[k] for k in ("anho", "mes", "dia", "hora")})
+    except Exception as e:
+        return {"ok": False, "error": f"SEC sin respuesta: {type(e).__name__}", "comunas": []}
+    com = [{"region": SEC_REGIONES[f["NOMBRE_REGION"]], "region_nombre": f["NOMBRE_REGION"].replace("`", "'"),
+            "comuna": f["NOMBRE_COMUNA"], "clientes": int(f.get("CLIENTES_AFECTADOS") or 0)}
+           for f in filas if f.get("NOMBRE_REGION") in SEC_REGIONES and (f.get("CLIENTES_AFECTADOS") or 0) > 0]
+    com.sort(key=lambda c: -c["clientes"])
+    return {"ok": True, "error": None,
+            "hora_sec": f"{ult['anho']}-{ult['mes']:02d}-{ult['dia']:02d} {ult['hora']:02d}:00 (hora de Chile)",
+            "total_nacional": ult.get("clientes_afectados"),
+            "total_area": sum(c["clientes"] for c in com), "comunas": com}
 
 
 def num(v):
@@ -115,12 +145,14 @@ def main():
     gen = ahora_utc().isoformat(timespec="seconds")
     E = ema(os.environ.get("DMC_USUARIO", "").strip(), os.environ.get("DMC_TOKEN", "").strip())
     M = mop()
-    for nombre, datos in (("ema", E), ("mop", M)):
+    S = sec()
+    for nombre, datos in (("ema", E), ("mop", M), ("sec", S)):
         datos["generado_utc"] = gen
         with open(os.path.join(a.salida, f"{nombre}.json"), "w", encoding="utf-8") as fh:
             json.dump(datos, fh, ensure_ascii=False, separators=(",", ":"))
     print(f"EMA: ok={E['ok']} estaciones={len(E['estaciones'])} {E.get('error') or ''} {E.get('aviso') or ''}")
     print(f"MOP: ok={M['ok']} emergencias={len(M['emergencias'])} {M.get('error') or ''}")
+    print(f"SEC: ok={S['ok']} comunas={len(S['comunas'])} clientes_area={S.get('total_area')} {S.get('error') or ''}")
 
 
 if __name__ == "__main__":
