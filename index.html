@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emergencias en vivo</title>
+<style>
+/* Listado compacto de emergencias en vivo para el widget Insertar de ArcGIS Experience Builder.
+   Consulta las APIs ArcGIS REST directamente desde el navegador. Sin librerías externas. */
+:root{
+  --navy:#0b2545; --ink:#1b2530; --muted:#5f6b78; --line:#e1e6ec; --bg:#ffffff; --soft:#f3f6f9;
+  --s3:#b81c1c; --s2:#e0701a; --s1:#c99a0e; --s0:#8a96a3; --ok:#2f7d4f;
+  --f:"Segoe UI","Helvetica Neue",Arial,sans-serif; --fc:"Arial Narrow","Segoe UI Semibold",Arial,sans-serif;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:13px/1.35 var(--f)}
+.app{display:flex;flex-direction:column;height:100%;min-height:320px}
+header{background:var(--navy);color:#fff;padding:8px 10px;display:flex;align-items:center;gap:8px}
+header h1{font:700 14px var(--fc);letter-spacing:.06em;text-transform:uppercase;margin:0;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.live{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3ccf74;box-shadow:0 0 0 0 rgba(60,207,116,.6);animation:p 2s infinite}
+.live.off{background:#9aa6b1;animation:none}
+@keyframes p{70%{box-shadow:0 0 0 6px rgba(60,207,116,0)}100%{box-shadow:0 0 0 0 rgba(60,207,116,0)}}
+header button{background:transparent;border:1px solid rgba(255,255,255,.5);color:#fff;border-radius:3px;font:600 11px var(--f);padding:3px 7px;cursor:pointer}
+header button:focus-visible,.chip:focus-visible{outline:2px solid #7cc4ff;outline-offset:1px}
+.sum{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border-bottom:1px solid var(--line)}
+.sum div{padding:6px 6px;border-left:1px solid var(--line);min-width:0} .sum div:first-child{border-left:0}
+.sum b{display:block;font:700 16px/1.1 var(--fc);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sum span{display:block;font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;line-height:1.2}
+.chips{display:flex;gap:4px;padding:6px 8px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.chip{flex:none;font:600 11px var(--f);border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:999px;padding:2px 8px;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--navy);border-color:var(--navy);color:#fff}
+.chip i{font-style:normal;opacity:.7;margin-left:3px}
+ul{list-style:none;margin:0;padding:0;overflow-y:auto;flex:1;min-height:0}
+li{display:grid;grid-template-columns:4px minmax(0,1fr) auto;gap:8px;padding:6px 8px 6px 0;border-bottom:1px solid var(--line)}
+li .bar{border-radius:0 2px 2px 0}
+li .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+li .m{font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+li .r{text-align:right;font-size:11px;color:var(--muted);white-space:nowrap}
+.tag{display:inline-block;font:700 9.5px var(--fc);letter-spacing:.05em;padding:0 4px;border-radius:2px;color:#fff;margin-right:4px;vertical-align:1px}
+.empty{padding:16px 10px;color:var(--muted);text-align:center}
+footer{font-size:10.5px;color:var(--muted);padding:5px 8px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:6px;flex-wrap:wrap}
+footer .err{color:var(--s3)}
+@media (prefers-reduced-motion:reduce){.live{animation:none}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <span class="live off" id="live" aria-hidden="true"></span>
+    <h1 title="Coquimbo a O'Higgins">Emergencias en vivo</h1>
+    <button type="button" id="btn" title="Actualizar ahora">Actualizar</button>
+  </header>
+  <div class="sum" aria-live="polite">
+    <div><b id="k-ema">–</b><span>Lluvia máx. (mm)</span></div>
+    <div><b id="k-dmc">–</b><span>Boletines DMC</span></div>
+    <div><b id="k-mop">–</b><span>Emerg. MOP</span></div>
+    <div><b id="k-luz">–</b><span>Clientes sin luz</span></div>
+    <div><b id="k-qda">–</b><span id="k-qda-l">Cauces DGA en alerta</span></div>
+  </div>
+  <div class="chips" role="group" aria-label="Filtrar por fuente" id="chips"></div>
+  <ul id="lista" aria-label="Eventos"><li class="empty" style="display:block">Cargando fuentes…</li></ul>
+  <footer><span id="upd">Sin actualizar</span><span id="err"></span></footer>
+</div>
+
+<script>
+/* ======================= CONFIGURACIÓN ======================= */
+const CONFIG = {
+  refrescoMin: 5,                       // minutos entre actualizaciones automáticas
+  diasMOP: 3,                           // emergencias MOP de los últimos N días
+  regiones: [4, 5, 13, 6],              // Coquimbo, Valparaíso, Metropolitana, O'Higgins
+  bbox: [-72.3, -35.1, -69.7, -29.0],   // xmin, ymin, xmax, ymax (EPSG:4326) del área del briefing
+  maxPorFuente: 25,
+  lluviaMinMm: 5,                       // solo estaciones con al menos estos mm (acumulado 2 días UTC)
+  fuentes: {
+    dmc: "https://services3.arcgis.com/aSoEm9TBK2shtWjP/arcgis/rest/services/DMC_CAP_Boletines/FeatureServer/0",
+    mop: "https://rest-sit.mop.gob.cl/arcgis/rest/services/EMERGENCIA/EMERGENCIA_MOP/MapServer/0",
+    luz: "https://services3.arcgis.com/CNzkI2T3GmfwkaAR/arcgis/rest/services/Cortes_Electricos_Unificados_Vista/FeatureServer/0",
+    dga: "https://services3.arcgis.com/aSoEm9TBK2shtWjP/arcgis/rest/services/DGA_MONITOREO_CAUCE/FeatureServer/0",
+    // Lluvia DMC y respaldo MOP: los descarga GitHub Actions cada 15 min (el token queda guardado como secreto)
+    emaJson: "datos/ema.json",
+    mopJson: "datos/mop.json",
+    // Capa "estado_quebradas" publicada por conector_emergencias.py (pegar su URL .../FeatureServer/0; vacío = omitir)
+    qda: ""
+  }
+};
+/* ============================================================= */
+
+const FUENTE = {
+  qda: {tag:"QDA", nombre:"Quebradas", color:"#0b2545"},
+  ema: {tag:"EMA", nombre:"Lluvia", color:"#1f5fbf"},
+  dmc: {tag:"DMC", nombre:"Boletines", color:"#5a3ea8"},
+  mop: {tag:"MOP", nombre:"Infraestructura", color:"#0f6f8f"},
+  luz: {tag:"LUZ", nombre:"Electricidad", color:"#b5651d"},
+  dga: {tag:"DGA", nombre:"Cauces", color:"#2f7d4f"}
+};
+const SEVCOL = ["var(--s0)","var(--s1)","var(--s2)","var(--s3)"];
+let filtro = "todas", items = [], timer = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmtFecha = ms => {
+  if (!ms) return "";
+  const d = new Date(ms), hoy = new Date();
+  const hh = d.toLocaleTimeString("es-CL",{hour:"2-digit",minute:"2-digit"});
+  return d.toDateString() === hoy.toDateString() ? hh : d.toLocaleDateString("es-CL",{day:"2-digit",month:"2-digit"}) + " " + hh;
+};
+const num = n => Number(n || 0).toLocaleString("es-CL");
+
+async function consultar(url, params) {
+  const p = new URLSearchParams({where:"1=1", outFields:"*", returnGeometry:"false", f:"json", ...params});
+  const r = await fetch(`${url}/query?${p}`, {cache:"no-store"});
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message || "error del servicio");
+  const fechas = new Set((d.fields || []).filter(f => f.type === "esriFieldTypeDate").map(f => f.name));
+  return {rows: (d.features || []).map(f => f.attributes || {}), fechas};
+}
+const bboxParams = () => ({geometry: CONFIG.bbox.join(","), geometryType:"esriGeometryEnvelope", inSR:"4326", spatialRel:"esriSpatialRelIntersects"});
+
+// campo de texto por coincidencia de nombre
+const campo = (row, claves) => { for (const k of Object.keys(row)) if (claves.some(c => k.toLowerCase().includes(c))) return row[k]; return null; };
+const textoFila = row => Object.values(row).filter(v => typeof v === "string").join(" ").toUpperCase();
+
+/* --------- fuentes --------- */
+let emaInfo = {lluviaMax: null, generado: null, estaciones: 0};
+async function leerJsonLocal(ruta) {
+  const r = await fetch(`${ruta}?t=${Date.now()}`, {cache: "no-store"});
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const d = await r.json();
+  if (!d.ok) throw new Error(d.error || "fuente sin datos");
+  return d;
+}
+async function cargarEMA() {
+  const d = await leerJsonLocal(CONFIG.fuentes.emaJson);
+  const est = d.estaciones || [];
+  emaInfo = {lluviaMax: est.length ? Math.max(...est.map(e => e.mm_2d || 0)) : 0, generado: Date.parse(d.generado_utc), estaciones: est.length};
+  const f1 = v => v == null ? "s/d" : v.toLocaleString("es-CL", {maximumFractionDigits: 1});
+  // mm_2d = "hoy" + "ayer" de la DMC (días UTC, se reinician a las 21:00 de Chile)
+  return est.filter(e => e.mm_2d >= CONFIG.lluviaMinMm).map(e => ({
+    fuente: "ema", mm: e.mm_2d, sev: e.mm_2d >= 30 ? 3 : e.mm_2d >= 20 ? 2 : e.mm_2d >= 10 ? 1 : 0,
+    fecha: Date.parse(d.generado_utc),
+    titulo: `${e.nombre} · ${f1(e.mm_2d)} mm`,
+    detalle: [e.comuna, `hoy ${f1(e.hoy_mm)} · ayer ${f1(e.ayer_mm)} mm (UTC)`].join(" · ")}));
+}
+
+async function cargarDMC() {
+  const {rows, fechas} = await consultar(CONFIG.fuentes.dmc, bboxParams());
+  const ahora = Date.now();
+  const nivel = {ALARMA:3, ALERTA:2, AVISO:1, ADVERTENCIA:1};
+  return rows.map(r => {
+    const txt = textoFila(r);
+    const cat = ["ALARMA","ALERTA","AVISO","ADVERTENCIA"].find(c => txt.includes(c)) || "BOLETÍN";
+    const exp = [...fechas].filter(f => /expir|venc|fin|hasta|end/i.test(f)).map(f => r[f]).find(Boolean);
+    const ini = [...fechas].filter(f => /onset|inicio|effective|sent|emision|fecha/i.test(f)).map(f => r[f]).find(Boolean);
+    return {fuente:"dmc", sev: nivel[cat] ?? 0, exp, fecha: ini,
+      titulo: campo(r, ["titulo","title","headline","evento","event","nombre"]) || cat,
+      detalle: [cat, campo(r, ["area","zona","region","descrip"])].filter(Boolean).join(" · ")};
+  }).filter(x => !x.exp || x.exp >= ahora);
+}
+
+async function cargarMOP() {
+  let rows;
+  try {
+    ({rows} = await consultar(CONFIG.fuentes.mop, {where:`CODREG IN (${CONFIG.regiones.join(",")})`, orderByFields:"FECHA DESC"}));
+  } catch (e) {                                   // el servidor MOP no admite consultas desde el navegador: usar la copia del servidor
+    rows = (await leerJsonLocal(CONFIG.fuentes.mopJson)).emergencias || [];
+  }
+  const desde = Date.now() - CONFIG.diasMOP * 864e5;
+  return rows.filter(r => {
+      const e = String(r.EMERGENCIA || "").trim().toLowerCase();
+      return r.FECHA >= desde && !/cerrado|cancelado/i.test(r.ESTADO_EMER || "") && !e.includes("prueba") && e.length > 5;
+    }).map(r => {
+      const g = String(r.GRAVEDAD || "").toLowerCase(), op = String(r.OPERATIVIDAD || "").toLowerCase();
+      const sev = g.includes("muy grave") || op.includes("no operativo") ? 3 : g.includes("grave") ? 2 : g.includes("moder") ? 1 : 0;
+      return {fuente:"mop", sev, fecha:r.FECHA, titulo:r.EMERGENCIA,
+        detalle:[r.ROL_VIAL, r.INFRA_AFEC, r.OPERATIVIDAD].filter(v => v && v !== "Otro Elemento").join(" · ")};
+    });
+}
+
+async function cargarLuz() {
+  const {rows} = await consultar(CONFIG.fuentes.luz, {...bboxParams(), outFields:"EMPRESA_ELEC,cant_clientes,CLITOTAL,FECHA_INICIO,ESTADO_CORTE,TIPO,Name"});
+  return rows.map(r => {
+    const cli = Number(r.cant_clientes ?? r.CLITOTAL ?? 0);
+    return {fuente:"luz", sev: cli >= 5000 ? 3 : cli >= 1000 ? 2 : cli >= 100 ? 1 : 0, fecha:r.FECHA_INICIO, clientes:cli,
+      titulo:`${num(cli)} clientes sin suministro`, detalle:[r.EMPRESA_ELEC, r.Name, r.ESTADO_CORTE || r.TIPO].filter(Boolean).join(" · ")};
+  });
+}
+
+async function cargarDGA() {
+  const {rows, fechas} = await consultar(CONFIG.fuentes.dga, bboxParams());
+  return rows.map(r => {
+    const txt = textoFila(r);
+    const sev = /ROJA|ALERTA ROJA|DESBORDE/.test(txt) ? 3 : /AMARILLA|ALERTA/.test(txt) ? 2 : /AZUL|PREVENT/.test(txt) ? 1 : 0;
+    return {fuente:"dga", sev, fecha: [...fechas].map(f => r[f]).filter(Boolean).sort().pop(),
+      titulo: campo(r, ["nom_estacion","nombre","estacion","name"]) || "Estación DGA",
+      detalle: [campo(r, ["estado","alerta","nivel"]), campo(r, ["caudal"]) != null ? `Q ${campo(r, ["caudal"])} m³/s` : null].filter(v => v != null && v !== "").join(" · ")};
+  });
+}
+
+async function cargarQDA() {
+  if (!CONFIG.fuentes.qda) return [];
+  const {rows} = await consultar(CONFIG.fuentes.qda, {where:"estado <> 'Normal'", orderByFields:"estado_orden DESC"});
+  return rows.map(r => ({fuente:"qda", sev:Number(r.estado_orden || 0), fecha:null, titulo:`${r.estado}: ${r.nombre}`,
+    detalle:[r.comuna, r.lluvia_max_radio_mm != null ? `${r.lluvia_max_radio_mm} mm` : null, r.dmc_boletin !== "Sin boletín" ? r.dmc_boletin : null,
+             r.mop_emergencias ? `${r.mop_emergencias} emerg. MOP` : null].filter(Boolean).join(" · ")}));
+}
+
+/* --------- render --------- */
+function render() {
+  const cont = {todas: items.length};
+  for (const k in FUENTE) cont[k] = items.filter(i => i.fuente === k).length;
+  $("chips").innerHTML = ["todas", ...Object.keys(FUENTE).filter(k => k !== "qda" || CONFIG.fuentes.qda)].map(k =>
+    `<button type="button" class="chip" data-f="${k}" aria-pressed="${filtro === k}">${k === "todas" ? "Todas" : FUENTE[k].nombre}<i>${cont[k] ?? 0}</i></button>`).join("");
+  const vis = items.filter(i => filtro === "todas" || i.fuente === filtro);
+  $("lista").innerHTML = vis.length ? vis.map(i => `
+    <li><span class="bar" style="background:${SEVCOL[i.sev]}"></span>
+      <span style="min-width:0"><div class="t"><span class="tag" style="background:${FUENTE[i.fuente].color}">${FUENTE[i.fuente].tag}</span>${esc(i.titulo)}</div>
+      <div class="m" title="${esc(i.detalle)}">${esc(i.detalle) || "&nbsp;"}</div></span>
+      <span class="r">${fmtFecha(i.fecha)}</span></li>`).join("")
+    : `<li class="empty" style="display:block">Sin eventos vigentes${filtro !== "todas" ? " en esta fuente" : ""}.</li>`;
+}
+
+async function actualizar() {
+  $("btn").disabled = true;
+  const fuentes = {ema:cargarEMA, dmc:cargarDMC, mop:cargarMOP, luz:cargarLuz, dga:cargarDGA, qda:cargarQDA};
+  const res = await Promise.allSettled(Object.values(fuentes).map(fn => fn()));
+  const errores = [], nuevos = [];
+  Object.keys(fuentes).forEach((k, i) => {
+    if (res[i].status === "fulfilled") {
+      let arr = res[i].value || [];
+      if (k === "dga") arr = arr.filter(x => x.sev > 0);   // solo estaciones con alerta
+      nuevos.push(...arr.sort((a, b) => b.sev - a.sev || (b.fecha || 0) - (a.fecha || 0)).slice(0, CONFIG.maxPorFuente));
+    } else errores.push(FUENTE[k].tag);
+  });
+  items = nuevos.sort((a, b) => b.sev - a.sev || (b.fecha || 0) - (a.fecha || 0));
+  const val = (k, v) => res[Object.keys(fuentes).indexOf(k)].status === "fulfilled" ? v : "–";
+  const ema = items.filter(i => i.fuente === "ema");
+  $("k-ema").textContent = val("ema", (emaInfo.lluviaMax ?? 0).toLocaleString("es-CL", {maximumFractionDigits: 1}));
+  $("k-dmc").textContent = val("dmc", items.filter(i => i.fuente === "dmc").length);
+  $("k-mop").textContent = val("mop", items.filter(i => i.fuente === "mop").length);
+  $("k-luz").textContent = val("luz", num(items.filter(i => i.fuente === "luz").reduce((s, i) => s + (i.clientes || 0), 0)));
+  $("k-qda-l").textContent = CONFIG.fuentes.qda ? "Quebradas en alerta" : "Cauces DGA en alerta";
+  $("k-qda").textContent = CONFIG.fuentes.qda ? val("qda", items.filter(i => i.fuente === "qda" && i.sev >= 2).length)
+                                              : val("dga", items.filter(i => i.fuente === "dga").length);
+  $("upd").textContent = "Actualizado " + new Date().toLocaleTimeString("es-CL",{hour:"2-digit",minute:"2-digit"}) + ` · cada ${CONFIG.refrescoMin} min`;
+  const emaHora = emaInfo.generado ? " · lluvia DMC " + new Date(emaInfo.generado).toLocaleTimeString("es-CL",{hour:"2-digit",minute:"2-digit"}) : "";
+  $("err").innerHTML = errores.length ? `<span class="err">Sin respuesta: ${errores.join(", ")}</span>` : "DMC · MOP · Electricidad · DGA" + emaHora;
+  $("live").classList.toggle("off", errores.filter(e => e !== "QDA").length >= 4);
+  $("btn").disabled = false;
+  render();
+}
+
+$("chips").addEventListener("click", e => { const b = e.target.closest(".chip"); if (b) { filtro = b.dataset.f; render(); } });
+$("btn").addEventListener("click", actualizar);
+actualizar();
+timer = setInterval(actualizar, CONFIG.refrescoMin * 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) actualizar(); });
+</script>
+</body>
+</html>
