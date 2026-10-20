@@ -55,7 +55,7 @@ footer .err{color:var(--s3)}
     <div><b id="k-ema">–</b><span>Lluvia máx. (mm)</span></div>
     <div><b id="k-dmc">–</b><span>Boletines DMC</span></div>
     <div><b id="k-mop">–</b><span>Emerg. MOP</span></div>
-    <div><b id="k-luz">–</b><span>Clientes sin luz</span></div>
+    <div><b id="k-luz">–</b><span id="k-luz-l">Sin luz no prog. CGE</span></div>
     <div><b id="k-qda">–</b><span id="k-qda-l">Cauces DGA en alerta</span></div>
   </div>
   <div class="chips" role="group" aria-label="Filtrar por fuente" id="chips"></div>
@@ -71,6 +71,8 @@ const CONFIG = {
   regiones: [4, 5, 13, 6],              // Coquimbo, Valparaíso, Metropolitana, O'Higgins
   bbox: [-72.3, -35.1, -69.7, -29.0],   // xmin, ymin, xmax, ymax (EPSG:4326) del área del briefing
   maxPorFuente: 25,
+  empresasLuz: ["ENEL", "CGE"],          // distribuidoras a mostrar (solo cortes no programados)
+  secComunas: 8,                        // comunas con más clientes sin luz según la SEC
   lluviaMinMm: 5,                       // solo estaciones con al menos estos mm (acumulado 2 días UTC)
   fuentes: {
     dmc: "https://services3.arcgis.com/aSoEm9TBK2shtWjP/arcgis/rest/services/DMC_CAP_Boletines/FeatureServer/0",
@@ -80,6 +82,7 @@ const CONFIG = {
     // Lluvia DMC y respaldo MOP: los descarga GitHub Actions cada 15 min (el token queda guardado como secreto)
     emaJson: "datos/ema.json",
     mopJson: "datos/mop.json",
+    secJson: "datos/sec.json",
     // Capa "estado_quebradas" publicada por conector_emergencias.py (pegar su URL .../FeatureServer/0; vacío = omitir)
     qda: ""
   }
@@ -178,13 +181,42 @@ async function cargarMOP() {
     });
 }
 
+const NOMBRE_EMP = {ENEL: "Enel", CGE: "CGE", CHILQUINTA: "Chilquinta", SAESA: "SAESA"};
+const sevCli = c => c >= 5000 ? 3 : c >= 1000 ? 2 : c >= 100 ? 1 : 0;
+let luzInfo = {cge: 0, sec: null, secHora: ""};
 async function cargarLuz() {
-  const {rows} = await consultar(CONFIG.fuentes.luz, {...bboxParams(), outFields:"EMPRESA_ELEC,cant_clientes,CLITOTAL,FECHA_INICIO,ESTADO_CORTE,TIPO,Name"});
-  return rows.map(r => {
-    const cli = Number(r.cant_clientes ?? r.CLITOTAL ?? 0);
-    return {fuente:"luz", sev: cli >= 5000 ? 3 : cli >= 1000 ? 2 : cli >= 100 ? 1 : 0, fecha:r.FECHA_INICIO, clientes:cli,
-      titulo:`${num(cli)} clientes sin suministro`, detalle:[r.EMPRESA_ELEC, r.Name, r.ESTADO_CORTE || r.TIPO].filter(Boolean).join(" · ")};
-  });
+  // Capa unificada: solo cortes NO PROGRAMADOS de las empresas configuradas (Enel, CGE)
+  const emp = CONFIG.empresasLuz.map(e => `'${e}'`).join(",");
+  const {rows} = await consultar(CONFIG.fuentes.luz, {...bboxParams(),
+    where: `ESTADO_CORTE = 'NO PROGRAMADO' AND EMPRESA_ELEC IN (${emp})`, outFields: "EMPRESA_ELEC,ESTADO_CORTE,DETALLE_CORTE"});
+  const out = [], zonas = {}, clientes = {};
+  for (const r of rows) {
+    const e = String(r.EMPRESA_ELEC || "").toUpperCase(), det = String(r.DETALLE_CORTE || "");
+    zonas[e] = (zonas[e] || 0) + 1;
+    // CGE informa los clientes dentro del texto: "Clientes afectados: 2707 | Restauración estimada: 20/10/2026 18:30 hrs"
+    const m = /clientes afectados:\s*([\d.]+)/i.exec(det);
+    if (!m) continue;
+    const cli = +m[1].replace(/\./g, ""), rest = /restauraci[oó]n estimada:\s*([^|]+)/i.exec(det);
+    clientes[e] = (clientes[e] || 0) + cli;
+    out.push({fuente: "luz", tag: e, sev: sevCli(cli), clientes: cli, titulo: `${NOMBRE_EMP[e] || e} · ${num(cli)} clientes sin luz`,
+      detalle: ["No programado", rest ? "reposición estimada " + rest[1].trim() : null].filter(Boolean).join(" · ")});
+  }
+  luzInfo.cge = clientes.CGE || 0;
+  // Filas resumen por empresa (van primero dentro de Electricidad)
+  for (const e of CONFIG.empresasLuz) {
+    if (!zonas[e]) continue;
+    out.push(clientes[e] != null
+      ? {fuente: "luz", tag: e, top: 1, sev: sevCli(clientes[e]), titulo: `${NOMBRE_EMP[e] || e}: ${num(clientes[e])} clientes sin luz (no programado)`, detalle: `${zonas[e]} zonas con corte no programado`}
+      : {fuente: "luz", tag: e, top: 1, sev: 2, titulo: `${NOMBRE_EMP[e] || e}: ${zonas[e]} zonas con corte no programado`, detalle: "La empresa no publica clientes por zona: ver total SEC por comuna"});
+  }
+  // SEC (todas las distribuidoras, por comuna), descargada por el servidor
+  try {
+    const d = await leerJsonLocal(CONFIG.fuentes.secJson);
+    luzInfo.sec = d.total_area; luzInfo.secHora = d.hora_sec;
+    d.comunas.slice(0, CONFIG.secComunas).forEach(c => out.push({fuente: "luz", tag: "SEC", sev: sevCli(c.clientes), clientes: c.clientes,
+      titulo: `${c.comuna} · ${num(c.clientes)} clientes`, detalle: `${c.region_nombre} · total SEC, todas las empresas · ${d.hora_sec}`}));
+  } catch (e) { luzInfo.sec = null; }
+  return out;
 }
 
 async function cargarDGA() {
@@ -212,10 +244,11 @@ function render() {
   for (const k in FUENTE) cont[k] = items.filter(i => i.fuente === k).length;
   $("chips").innerHTML = ["todas", ...Object.keys(FUENTE).filter(k => k !== "qda" || CONFIG.fuentes.qda)].map(k =>
     `<button type="button" class="chip" data-f="${k}" aria-pressed="${filtro === k}">${k === "todas" ? "Todas" : FUENTE[k].nombre}<i>${cont[k] ?? 0}</i></button>`).join("");
-  const vis = items.filter(i => filtro === "todas" || i.fuente === filtro);
+  const vis = filtro === "todas" ? items
+    : items.filter(i => i.fuente === filtro).sort((a, b) => (b.top || 0) - (a.top || 0) || b.sev - a.sev);
   $("lista").innerHTML = vis.length ? vis.map(i => `
     <li><span class="bar" style="background:${SEVCOL[i.sev]}"></span>
-      <span style="min-width:0"><div class="t"><span class="tag" style="background:${FUENTE[i.fuente].color}">${FUENTE[i.fuente].tag}</span>${esc(i.titulo)}</div>
+      <span style="min-width:0"><div class="t"><span class="tag" style="background:${FUENTE[i.fuente].color}">${esc(i.tag || FUENTE[i.fuente].tag)}</span>${esc(i.titulo)}</div>
       <div class="m" title="${esc(i.detalle)}">${esc(i.detalle) || "&nbsp;"}</div></span>
       <span class="r">${fmtFecha(i.fecha)}</span></li>`).join("")
     : `<li class="empty" style="display:block">Sin eventos vigentes${filtro !== "todas" ? " en esta fuente" : ""}.</li>`;
@@ -230,16 +263,17 @@ async function actualizar() {
     if (res[i].status === "fulfilled") {
       let arr = res[i].value || [];
       if (k === "dga") arr = arr.filter(x => x.sev > 0);   // solo estaciones con alerta
-      nuevos.push(...arr.sort((a, b) => b.sev - a.sev || (b.fecha || 0) - (a.fecha || 0)).slice(0, CONFIG.maxPorFuente));
+      nuevos.push(...arr.sort((a, b) => (b.top || 0) - (a.top || 0) || b.sev - a.sev || (b.fecha || 0) - (a.fecha || 0)).slice(0, CONFIG.maxPorFuente));
     } else errores.push(FUENTE[k].tag);
   });
-  items = nuevos.sort((a, b) => b.sev - a.sev || (b.fecha || 0) - (a.fecha || 0));
+  items = nuevos.sort((a, b) => b.sev - a.sev || (b.top || 0) - (a.top || 0) || (b.fecha || 0) - (a.fecha || 0));
   const val = (k, v) => res[Object.keys(fuentes).indexOf(k)].status === "fulfilled" ? v : "–";
   const ema = items.filter(i => i.fuente === "ema");
   $("k-ema").textContent = val("ema", (emaInfo.lluviaMax ?? 0).toLocaleString("es-CL", {maximumFractionDigits: 1}));
   $("k-dmc").textContent = val("dmc", items.filter(i => i.fuente === "dmc").length);
   $("k-mop").textContent = val("mop", items.filter(i => i.fuente === "mop").length);
-  $("k-luz").textContent = val("luz", num(items.filter(i => i.fuente === "luz").reduce((s, i) => s + (i.clientes || 0), 0)));
+  $("k-luz").textContent = val("luz", num(luzInfo.cge));
+  $("k-luz").title = luzInfo.sec != null ? `SEC, todas las empresas en el área: ${num(luzInfo.sec)} clientes (${luzInfo.secHora})` : "";
   $("k-qda-l").textContent = CONFIG.fuentes.qda ? "Quebradas en alerta" : "Cauces DGA en alerta";
   $("k-qda").textContent = CONFIG.fuentes.qda ? val("qda", items.filter(i => i.fuente === "qda" && i.sev >= 2).length)
                                               : val("dga", items.filter(i => i.fuente === "dga").length);
